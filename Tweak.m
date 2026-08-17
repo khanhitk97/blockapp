@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 #import <CoreMotion/CoreMotion.h>
 #import <objc/runtime.h>
@@ -10,6 +11,9 @@
 #define KEY_DECOY_PIN @"com.sec.decoy_pin"
 #define INACTIVITY_TIMEOUT 60.0
 #define MAX_FAILED_ATTEMPTS 3
+
+// MARK: - Forward Declarations
+@class DisguiseWindowController;
 
 // MARK: - Helper lấy Window & Top ViewController an toàn trên mọi iOS
 static UIWindow *getAppKeyWindow(void) {
@@ -280,7 +284,7 @@ static UIViewController *getTopViewController(void) {
 
 @end
 
-// MARK: - 5. Giao diện Thẻ thời tiết & Màn hình Apple Weather Fake
+// MARK: - 5. Thẻ thời tiết & Màn hình Apple Weather Fake
 @interface WeatherCardView : UIView
 @end
 
@@ -341,6 +345,16 @@ static UIViewController *getTopViewController(void) {
     }
     return self;
 }
+@end
+
+// MARK: - Quản lý Fake Window Controller
+@interface DisguiseWindowController : NSObject
++ (instancetype)sharedInstance;
+@property (nonatomic, strong) UIWindow *fakeWindow;
+@property (nonatomic, assign) BOOL isUnlocked;
+- (void)presentDisguise;
+- (void)resetToLocked;
+- (void)ensureDisguiseOnTop;
 @end
 
 @interface FakeWeatherViewController : UIViewController <UITextFieldDelegate>
@@ -480,6 +494,7 @@ static UIViewController *getTopViewController(void) {
 }
 
 - (void)unlockRealApp {
+    [DisguiseWindowController sharedInstance].isUnlocked = YES;
     [UIView animateWithDuration:0.3 animations:^{
         self.view.window.alpha = 0.0;
     } completion:^(BOOL finished) {
@@ -513,64 +528,113 @@ static UIViewController *getTopViewController(void) {
 
 @end
 
-// MARK: - 6. Quản lý Fake Window
-@interface DisguiseWindowController : NSObject
-+ (instancetype)sharedInstance;
-- (void)presentDisguise;
-- (void)resetToLocked;
-@end
-
-@implementation DisguiseWindowController {
-    UIWindow *_fakeWindow;
-}
+// MARK: - 6. Quản lý Fake Window & Chặn tuyệt đối
+@implementation DisguiseWindowController
 
 + (instancetype)sharedInstance {
     static DisguiseWindowController *inst = nil;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ inst = [[DisguiseWindowController alloc] init]; });
+    dispatch_once(&onceToken, ^{ 
+        inst = [[DisguiseWindowController alloc] init];
+        inst.isUnlocked = NO;
+    });
     return inst;
 }
 
 - (void)presentDisguise {
+    if (self.isUnlocked) return;
+
     [[InactivityManager sharedInstance] stop];
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self->_fakeWindow) {
-            UIWindowScene *scene = nil;
-            if (@available(iOS 13.0, *)) {
-                for (UIWindowScene *s in UIApplication.sharedApplication.connectedScenes) {
-                    if (s.activationState == UISceneActivationStateForegroundActive ||
-                        s.activationState == UISceneActivationStateForegroundInactive) {
-                        scene = s;
-                        break;
-                    }
+        UIWindowScene *activeScene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    activeScene = (UIWindowScene *)scene;
+                    break;
                 }
-                if (scene) self->_fakeWindow = [[UIWindow alloc] initWithWindowScene:scene];
             }
-            if (!self->_fakeWindow) {
-                self->_fakeWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            }
-            self->_fakeWindow.windowLevel = UIWindowLevelAlert + 100;
-            self->_fakeWindow.rootViewController = [[FakeWeatherViewController alloc] init];
         }
-        self->_fakeWindow.alpha = 1.0;
-        self->_fakeWindow.hidden = NO;
-        [self->_fakeWindow makeKeyAndVisible];
+
+        if (!self.fakeWindow) {
+            if (activeScene && @available(iOS 13.0, *)) {
+                self.fakeWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+            } else {
+                self.fakeWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
+            self.fakeWindow.rootViewController = [[FakeWeatherViewController alloc] init];
+        } else if (activeScene && @available(iOS 13.0, *)) {
+            if (self.fakeWindow.windowScene != activeScene) {
+                self.fakeWindow.windowScene = activeScene;
+            }
+        }
+
+        self.fakeWindow.windowLevel = CGFLOAT_MAX;
+        self.fakeWindow.alpha = 1.0;
+        self.fakeWindow.hidden = NO;
+        [self.fakeWindow makeKeyAndVisible];
     });
 }
 
 - (void)resetToLocked {
+    self.isUnlocked = NO;
     [[InactivityManager sharedInstance] stop];
-    if (_fakeWindow) {
-        _fakeWindow.alpha = 1.0;
-        _fakeWindow.hidden = NO;
+    [self presentDisguise];
+}
+
+- (void)ensureDisguiseOnTop {
+    if (!self.isUnlocked && self.fakeWindow && !self.fakeWindow.hidden) {
+        [self.fakeWindow.superview bringSubviewToFront:self.fakeWindow];
+        self.fakeWindow.windowLevel = CGFLOAT_MAX;
+        [self.fakeWindow makeKeyAndVisible];
     }
 }
 
 @end
 
-// MARK: - 7. Hooks vòng đời
+// MARK: - 7. Hook UIWindow makeKeyAndVisible
+@implementation UIWindow (SecurityEnforcer)
+
++ (void)load {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class cls = [UIWindow class];
+        Method orig = class_getInstanceMethod(cls, @selector(makeKeyAndVisible));
+        Method swiz = class_getInstanceMethod(cls, @selector(sec_makeKeyAndVisible));
+        method_exchangeImplementations(orig, swiz);
+    });
+}
+
+- (void)sec_makeKeyAndVisible {
+    [self sec_makeKeyAndVisible];
+
+    DisguiseWindowController *controller = [DisguiseWindowController sharedInstance];
+    if (!controller.isUnlocked && self != controller.fakeWindow) {
+        [controller presentDisguise];
+    }
+}
+
+@end
+
+// MARK: - 8. Khởi tạo Hook vòng đời
 __attribute__((constructor))
 static void initFullSecuritySystem(void) {
+    if (@available(iOS 13.0, *)) {
+        [[NSNotificationCenter defaultCenter] addObserverForName:UISceneWillConnectNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            [[DisguiseWindowController sharedInstance] presentDisguise];
+        }];
+
+        [[NSNotificationCenter defaultCenter] addObserverForName:UISceneDidActivateNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            [[DisguiseWindowController sharedInstance] ensureDisguiseOnTop];
+        }];
+    }
+
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
@@ -590,6 +654,7 @@ static void initFullSecuritySystem(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
         [[SecurityGuard sharedInstance] removeAppSwitcherMask];
+        [[DisguiseWindowController sharedInstance] ensureDisguiseOnTop];
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
