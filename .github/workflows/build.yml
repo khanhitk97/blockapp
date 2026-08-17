@@ -1,0 +1,37 @@
+name: Build Security Dylib
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile dylib with Clang
+        run: |
+          xcrun --sdk iphoneos clang -dynamiclib \
+            -arch arm64 -arch arm64e \
+            -miphoneos-version-min=14.0 \
+            -framework Foundation \
+            -framework UIKit \
+            -framework Security \
+            -framework CoreMotion \
+            -fobjc-arc \
+            -o libWeatherDisguise.dylib Tweak.m
+
+      - name: Pseudo CodeSign (ldid)
+        run: |
+          brew install ldid
+          ldid -S libWeatherDisguise.dylib
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libWeatherDisguise
+          path: libWeatherDisguise.dylib
