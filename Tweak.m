@@ -1,3 +1,4 @@
+#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <CoreMotion/CoreMotion.h>
@@ -9,6 +10,33 @@
 #define KEY_DECOY_PIN @"com.sec.decoy_pin"
 #define INACTIVITY_TIMEOUT 60.0
 #define MAX_FAILED_ATTEMPTS 3
+
+// MARK: - Helper lấy Window & Top ViewController an toàn trên mọi iOS
+static UIWindow *getAppKeyWindow(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive ||
+                scene.activationState == UISceneActivationStateForegroundInactive) {
+                for (UIWindow *w in scene.windows) {
+                    if (w.isKeyWindow) return w;
+                }
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+}
+
+static UIViewController *getTopViewController(void) {
+    UIWindow *window = getAppKeyWindow();
+    UIViewController *topVC = window.rootViewController;
+    while (topVC.presentedViewController) {
+        topVC = topVC.presentedViewController;
+    }
+    return topVC;
+}
 
 // MARK: - 1. Lưu trữ Keychain an toàn
 @interface PINStore : NSObject
@@ -86,7 +114,7 @@
 
 - (void)reset {
     if (!_active) return;
-    dispatch_async(dispatch_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_timer) [self->_timer invalidate];
         self->_timer = [NSTimer scheduledTimerWithTimeInterval:INACTIVITY_TIMEOUT
                                                         target:self
@@ -165,8 +193,8 @@
 }
 
 - (void)screenCaptureChanged {
-    dispatch_async(dispatch_main_queue(), ^{
-        UIWindow *window = UIApplication.sharedApplication.keyWindow;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = getAppKeyWindow();
         if ([UIScreen mainScreen].isCaptured) {
             if (!self->_screenRecordMask) {
                 self->_screenRecordMask = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -178,8 +206,10 @@
                 lbl.numberOfLines = 2;
                 [self->_screenRecordMask addSubview:lbl];
             }
-            [window addSubview:self->_screenRecordMask];
-            [window bringSubviewToFront:self->_screenRecordMask];
+            if (window) {
+                [window addSubview:self->_screenRecordMask];
+                [window bringSubviewToFront:self->_screenRecordMask];
+            }
         } else {
             [self->_screenRecordMask removeFromSuperview];
         }
@@ -187,7 +217,7 @@
 }
 
 - (void)applyAppSwitcherMask {
-    UIWindow *window = UIApplication.sharedApplication.keyWindow;
+    UIWindow *window = getAppKeyWindow();
     if (!window) return;
     if (!_privacyBlurView) {
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
@@ -205,8 +235,8 @@
 }
 
 - (void)presentStealthMenu {
-    UIViewController *topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-    while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+    UIViewController *topVC = getTopViewController();
+    if (!topVC) return;
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cài đặt bảo mật ẩn"
                                                                    message:@"Quản lý mã PIN hệ thống"
@@ -457,11 +487,13 @@
         [[InactivityManager sharedInstance] start];
         [[SecurityGuard sharedInstance] startMotionAndScreenProtection];
 
-        UIWindow *appWindow = [UIApplication sharedApplication].keyWindow;
-        UITapGestureRecognizer *stealthGesture = [[UITapGestureRecognizer alloc] initWithTarget:[SecurityGuard sharedInstance] action:@selector(presentStealthMenu)];
-        stealthGesture.numberOfTouchesRequired = 3;
-        stealthGesture.numberOfTapsRequired = 2;
-        [appWindow addGestureRecognizer:stealthGesture];
+        UIWindow *appWindow = getAppKeyWindow();
+        if (appWindow) {
+            UITapGestureRecognizer *stealthGesture = [[UITapGestureRecognizer alloc] initWithTarget:[SecurityGuard sharedInstance] action:@selector(presentStealthMenu)];
+            stealthGesture.numberOfTouchesRequired = 3;
+            stealthGesture.numberOfTapsRequired = 2;
+            [appWindow addGestureRecognizer:stealthGesture];
+        }
     }];
 }
 
@@ -481,7 +513,7 @@
 
 @end
 
-// MARK: - 6. Quản lý Window ngụy trang
+// MARK: - 6. Quản lý Fake Window
 @interface DisguiseWindowController : NSObject
 + (instancetype)sharedInstance;
 - (void)presentDisguise;
@@ -501,13 +533,13 @@
 
 - (void)presentDisguise {
     [[InactivityManager sharedInstance] stop];
-    dispatch_async(dispatch_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (!self->_fakeWindow) {
             UIWindowScene *scene = nil;
             if (@available(iOS 13.0, *)) {
                 for (UIWindowScene *s in UIApplication.sharedApplication.connectedScenes) {
                     if (s.activationState == UISceneActivationStateForegroundActive ||
-                        scene.activationState == UISceneActivationStateForegroundInactive) {
+                        s.activationState == UISceneActivationStateForegroundInactive) {
                         scene = s;
                         break;
                     }
