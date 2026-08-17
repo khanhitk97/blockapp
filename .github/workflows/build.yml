@@ -20,6 +20,7 @@ jobs:
             -miphoneos-version-min=14.0 \
             -framework Foundation \
             -framework UIKit \
+            -framework QuartzCore \
             -framework Security \
             -framework CoreMotion \
             -fobjc-arc \
